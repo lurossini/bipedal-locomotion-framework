@@ -6,6 +6,7 @@
  */
 
 #include <cstddef>
+#include <map>
 #include <memory>
 
 #include <iDynTree/KinDynComputations.h>
@@ -32,118 +33,127 @@ struct QPInverseKinematics::Impl
         std::shared_ptr<const System::WeightProviderPort> weightProvider;
         Eigen::MatrixXd tmp; /**< This is a temporary matrix usefull to reduce dynamics allocation
                                 in advance method */
+        Eigen::VectorXd achievedOutput;
     };
 
     QPInverseKinematics::State solution;
 
     System::VariablesHandler::VariableDescription robotVelocityVariable;
 
-    OsqpEigen::Solver solver; /**< Optimization solver. */
     bool isVerbose{false};
 
     std::unordered_map<std::string, TaskWithPriority> tasks;
 
     std::vector<std::reference_wrapper<const TaskWithPriority>> constraints;
     std::vector<std::reference_wrapper<TaskWithPriority>> costs;
-    std::size_t numberOfConstraints;
-
-    Eigen::MatrixXd hessian;
-    Eigen::VectorXd gradient;
-    Eigen::MatrixXd constraintMatrix;
-    Eigen::VectorXd lowerBound;
-    Eigen::VectorXd upperBound;
-
-    bool isFirstIteration{true};
     bool isValid{false};
     bool isInitialized{false};
     bool isFinalized{false};
 
-    bool initializeSolver()
+    struct PriorityLevel
     {
-        constexpr auto logPrefix = "[QPInversekinematics::Impl::initializeSolver]";
-        // Hessian matrix
-        Eigen::SparseMatrix<double> hessianSparse = this->hessian.sparseView();
-        if (!this->solver.data()->setHessianMatrix(hessianSparse))
+        OsqpEigen::Solver solver;
+        std::vector<std::reference_wrapper<const TaskWithPriority>> constraints;
+        std::vector<std::reference_wrapper<TaskWithPriority>> costs;
+        std::size_t numberOfConstraints{0};
+
+        Eigen::MatrixXd hessian;
+        Eigen::VectorXd gradient;
+        Eigen::MatrixXd constraintMatrix;
+        Eigen::VectorXd lowerBound;
+        Eigen::VectorXd upperBound;
+
+        bool isFirstIteration{true};
+
+        bool initializeSolver()
         {
-            log()->error("{} Unable to set the hessian matrix.", logPrefix);
-            return false;
+            constexpr auto logPrefix = "[QPInversekinematics::Impl::initializeSolver]";
+            // Hessian matrix
+            Eigen::SparseMatrix<double> hessianSparse = this->hessian.sparseView();
+            if (!this->solver.data()->setHessianMatrix(hessianSparse))
+            {
+                log()->error("{} Unable to set the hessian matrix.", logPrefix);
+                return false;
+            }
+
+            // gradient
+            if (!this->solver.data()->setGradient(gradient))
+            {
+                log()->error("{} Unable to set the gradient vector.", logPrefix);
+                return false;
+            }
+
+            // if there are constraints
+            if (this->numberOfConstraints > 0)
+            {
+                Eigen::SparseMatrix<double> constraintsMatrixSparse
+                    = this->constraintMatrix.sparseView();
+                if (!this->solver.data()->setLinearConstraintsMatrix(constraintsMatrixSparse))
+                {
+                    log()->error("{} Unable to set the constraint matrix.", logPrefix);
+                    return false;
+                }
+
+                if (!this->solver.data()->setBounds(this->lowerBound, this->upperBound))
+                {
+                    log()->error("{} Unable to set the bounds.", logPrefix);
+                    return false;
+                }
+            }
+
+            if (!this->solver.initSolver())
+            {
+                log()->error("{} Unable to initialize the solver.", logPrefix);
+                return false;
+            }
+
+            return true;
         }
 
-        // gradient
-        if (!this->solver.data()->setGradient(gradient))
+        bool updateSolver()
         {
-            log()->error("{} Unable to set the gradient vector.", logPrefix);
-            return false;
-        }
+            constexpr auto logPrefix = "[QPInversekinematics::Impl::updateSolver]";
+            // Hessian matrix
+            Eigen::SparseMatrix<double> hessianSparse = this->hessian.sparseView();
+            if (!this->solver.updateHessianMatrix(hessianSparse))
+            {
+                log()->error("{} Unable to set the hessian matrix.", logPrefix);
+                return false;
+            }
 
-        // if there are constraints
-        if (this->numberOfConstraints > 0)
-        {
-            Eigen::SparseMatrix<double> constraintsMatrixSparse
-                = this->constraintMatrix.sparseView();
-            if (!this->solver.data()->setLinearConstraintsMatrix(constraintsMatrixSparse))
+            // gradient
+            if (!this->solver.updateGradient(gradient))
+            {
+                log()->error("{} Unable to set the gradient vector.", logPrefix);
+                return false;
+            }
+
+            // if the number of constraints is equal to zero we do not need to update the constraint
+            if (this->numberOfConstraints == 0)
+            {
+                return true;
+            }
+
+            // in this case the number of constraint is different from zero, so we have to update the
+            // constraint matrix and the bounds
+            Eigen::SparseMatrix<double> constraintsMatrixSparse = this->constraintMatrix.sparseView();
+            if (!this->solver.updateLinearConstraintsMatrix(constraintsMatrixSparse))
             {
                 log()->error("{} Unable to set the constraint matrix.", logPrefix);
                 return false;
             }
 
-            if (!this->solver.data()->setBounds(this->lowerBound, this->upperBound))
+            if (!this->solver.updateBounds(this->lowerBound, this->upperBound))
             {
                 log()->error("{} Unable to set the bounds.", logPrefix);
                 return false;
             }
-        }
 
-        if (!this->solver.initSolver())
-        {
-            log()->error("{} Unable to initialize the solver.", logPrefix);
-            return false;
-        }
-
-        return true;
-    }
-
-    bool updateSolver()
-    {
-        constexpr auto logPrefix = "[QPInversekinematics::Impl::updateSolver]";
-        // Hessian matrix
-        Eigen::SparseMatrix<double> hessianSparse = this->hessian.sparseView();
-        if (!this->solver.updateHessianMatrix(hessianSparse))
-        {
-            log()->error("{} Unable to set the hessian matrix.", logPrefix);
-            return false;
-        }
-
-        // gradient
-        if (!this->solver.updateGradient(gradient))
-        {
-            log()->error("{} Unable to set the gradient vector.", logPrefix);
-            return false;
-        }
-
-        // if the number of constraints is equal to zero we do not need to update the constraint
-        if (this->numberOfConstraints == 0)
-        {
             return true;
         }
 
-        // in this case the number of constraint is different from zero, so we have to update the
-        // constraint matrix and the bounds
-        Eigen::SparseMatrix<double> constraintsMatrixSparse = this->constraintMatrix.sparseView();
-        if (!this->solver.updateLinearConstraintsMatrix(constraintsMatrixSparse))
-        {
-            log()->error("{} Unable to set the constraint matrix.", logPrefix);
-            return false;
-        }
-
-        if (!this->solver.updateBounds(this->lowerBound, this->upperBound))
-        {
-            log()->error("{} Unable to set the bounds.", logPrefix);
-            return false;
-        }
-
-        return true;
-    }
+    };
+    std::vector<std::unique_ptr<PriorityLevel>> solvers;
 };
 
 QPInverseKinematics::QPInverseKinematics()
@@ -179,19 +189,10 @@ bool QPInverseKinematics::addTask(std::shared_ptr<QPInverseKinematics::Task> tas
         return false;
     }
 
-    if (priority != 0 && priority != 1)
-    {
-        log()->error("{} - [Task name: '{}'] For the time being we support only priority equal to "
-                     "0 or 1.",
-                     logPrefix,
-                     taskName);
-        return false;
-    }
-
-    if (priority == 1 && task->type() == System::LinearTask::Type::inequality)
+    if (priority > 0 && task->type() == System::LinearTask::Type::inequality)
     {
         log()->error("{} - [Task name: '{}'] This implementation of the inverse kinematics cannot "
-                     "handle inequality tasks with priority equal to 1.",
+                     "handle inequality tasks with positive priority.",
                      logPrefix,
                      taskName);
         return false;
@@ -201,11 +202,10 @@ bool QPInverseKinematics::addTask(std::shared_ptr<QPInverseKinematics::Task> tas
     m_pimpl->tasks[taskName].task = task;
     m_pimpl->tasks[taskName].priority = priority;
 
-    // If the priority is set to 1 the user has to provide the weight in terms of weight provider
-    if (priority == 1 && !weightProvider)
+    if (priority > 0 && !weightProvider)
     {
         log()->error("{} - [Task name: '{}'] Please provide the associated weight. This is "
-                     "necessary since the priority of the task is equal to 1",
+                     "necessary since the priority of the task is positive",
                      logPrefix,
                      taskName);
 
@@ -215,7 +215,7 @@ bool QPInverseKinematics::addTask(std::shared_ptr<QPInverseKinematics::Task> tas
         return false;
     }
 
-    if (priority == 1 && weightProvider)
+    if (priority > 0 && weightProvider)
     {
         if (weightProvider->getOutput().size() != task->size())
         {
@@ -264,10 +264,10 @@ bool QPInverseKinematics::setTaskWeight(
 
     auto taskWithPriority = tmp->second;
 
-    if (taskWithPriority.priority != 1)
+    if (taskWithPriority.priority == 0)
     {
         log()->error("{} - [Task name: '{}'] The weight can be set only to a task with priority "
-                     "equal to 1.",
+                     "greater than 0.",
                      logPrefix,
                      taskName);
         return false;
@@ -332,14 +332,10 @@ bool QPInverseKinematics::finalize(const System::VariablesHandler& handler)
 
     m_pimpl->isFinalized = false;
 
-    // clear the solver
-    m_pimpl->solver.clearSolver();
-
-    // set the some internal parameter of osqp-eigen
-    m_pimpl->solver.settings()->setVerbosity(m_pimpl->isVerbose);
+    m_pimpl->isValid = false;
+    m_pimpl->solvers.clear();
 
     // set the variable handler for all the tasks
-    m_pimpl->numberOfConstraints = 0;
     for (auto& [name, task] : m_pimpl->tasks)
     {
         if (!task.task->setVariablesHandler(handler))
@@ -352,11 +348,6 @@ bool QPInverseKinematics::finalize(const System::VariablesHandler& handler)
             return false;
         }
 
-        // if priority is equal to 0 the task is considered as hard constraint.
-        if (task.priority == 0)
-        {
-            m_pimpl->numberOfConstraints += task.task->size();
-        }
     }
 
     // resize the temporary matrix usefull to reduce dynamics allocation when advance() is called
@@ -370,18 +361,43 @@ bool QPInverseKinematics::finalize(const System::VariablesHandler& handler)
 
         cost.get().tmp.resize(handler.getNumberOfVariables(),
                               cost.get().weightProvider->getOutput().size());
+        cost.get().achievedOutput.resize(cost.get().task->size());
     }
 
-    m_pimpl->solver.data()->setNumberOfVariables(handler.getNumberOfVariables());
-    m_pimpl->solver.data()->setNumberOfConstraints(m_pimpl->numberOfConstraints);
+    std::map<std::size_t, std::vector<std::reference_wrapper<Impl::TaskWithPriority>>> levels;
+    for (auto& cost : m_pimpl->costs)
+    {
+        levels[cost.get().priority].push_back(cost);
+    }
+    if (levels.empty())
+    {
+        levels[1];
+    }
 
-    // resize matrices
-    m_pimpl->hessian.resize(handler.getNumberOfVariables(), handler.getNumberOfVariables());
-    m_pimpl->gradient.resize(handler.getNumberOfVariables());
-
-    m_pimpl->constraintMatrix.resize(m_pimpl->numberOfConstraints, handler.getNumberOfVariables());
-    m_pimpl->upperBound.resize(m_pimpl->numberOfConstraints);
-    m_pimpl->lowerBound.resize(m_pimpl->numberOfConstraints);
+    auto constraints = m_pimpl->constraints;
+    for (const auto& [priority, costs] : levels)
+    {
+        auto level = std::make_unique<Impl::PriorityLevel>();
+        level->costs = costs;
+        level->constraints = constraints;
+        for (const auto& constraint : constraints)
+        {
+            level->numberOfConstraints += constraint.get().task->size();
+        }
+        level->solver.settings()->setVerbosity(m_pimpl->isVerbose);
+        level->solver.data()->setNumberOfVariables(handler.getNumberOfVariables());
+        level->solver.data()->setNumberOfConstraints(level->numberOfConstraints);
+        level->hessian.resize(handler.getNumberOfVariables(), handler.getNumberOfVariables());
+        level->gradient.resize(handler.getNumberOfVariables());
+        level->constraintMatrix.resize(level->numberOfConstraints, handler.getNumberOfVariables());
+        level->upperBound.resize(level->numberOfConstraints);
+        level->lowerBound.resize(level->numberOfConstraints);
+        m_pimpl->solvers.push_back(std::move(level));
+        for (const auto& cost : costs)
+        {
+            constraints.push_back(cost.get());
+        }
+    }
 
     if (!handler.getVariable(m_pimpl->robotVelocityVariable.name, m_pimpl->robotVelocityVariable))
     {
@@ -390,7 +406,6 @@ bool QPInverseKinematics::finalize(const System::VariablesHandler& handler)
     }
 
     m_pimpl->isFinalized = true;
-    m_pimpl->isFirstIteration = true;
 
     return true;
 }
@@ -439,103 +454,128 @@ bool QPInverseKinematics::advance()
         assert(task.task->isValid() && "One of the task is not valid.");
     }
 
-    // Compute the gradient and the hessian
-    m_pimpl->hessian.setZero();
-    m_pimpl->gradient.setZero();
-    for (auto& cost : m_pimpl->costs)
+    for (auto& levelPtr : m_pimpl->solvers)
     {
-        Eigen::Ref<const Eigen::MatrixXd> A = cost.get().task->getA();
-        Eigen::Ref<const Eigen::VectorXd> b = cost.get().task->getB();
+        auto& level = *levelPtr;
+        // Compute the gradient and the hessian
+        level.hessian.setZero();
+        level.gradient.setZero();
+        for (auto& cost : level.costs)
+        {
+            Eigen::Ref<const Eigen::MatrixXd> A = cost.get().task->getA();
+            Eigen::Ref<const Eigen::VectorXd> b = cost.get().task->getB();
 
-        // Here we avoid to have dynamic allocation
-        cost.get().tmp.noalias() = A.transpose() * //
-                                   cost.get().weightProvider->getOutput().asDiagonal();
-        m_pimpl->hessian.noalias() += cost.get().tmp * A;
-        m_pimpl->gradient.noalias() -= cost.get().tmp * b;
-    }
+            // Here we avoid to have dynamic allocation
+            cost.get().tmp.noalias() = A.transpose() * //
+                                       cost.get().weightProvider->getOutput().asDiagonal();
+            level.hessian.noalias() += cost.get().tmp * A;
+            level.gradient.noalias() -= cost.get().tmp * b;
+        }
 
-    // compute the constraints
-    std::size_t index = 0;
-    for (const auto& constraint : m_pimpl->constraints)
-    {
-        // check if the number of constraints changed
-        if (m_pimpl->numberOfConstraints < index + constraint.get().task->size())
+        // compute the constraints
+        std::size_t index = 0;
+        for (const auto& constraint : level.constraints)
+        {
+            // check if the number of constraints changed
+            if (level.numberOfConstraints < index + constraint.get().task->size())
+            {
+                log()->error("{} The number of constraints changed. Please call finalize() again. "
+                             "Expected number of constraints: {}. Adding the constrained named {}, the "
+                             "number of constraints becomes {}.",
+                             logPrefix,
+                             level.numberOfConstraints,
+                             constraint.get().task->getDescription(),
+                             index + constraint.get().task->size());
+                return false;
+            }
+
+            Eigen::Ref<const Eigen::MatrixXd> A = constraint.get().task->getA();
+            Eigen::Ref<const Eigen::VectorXd> b = constraint.get().task->getB();
+
+            level.constraintMatrix.middleRows(index, constraint.get().task->size()) = A;
+            level.upperBound.segment(index, constraint.get().task->size()) = b;
+
+            if (constraint.get().priority > 0)
+            {
+                level.upperBound.segment(index, constraint.get().task->size())
+                    = constraint.get().achievedOutput;
+                const auto& weights = constraint.get().weightProvider->getOutput();
+                for (Eigen::Index row = 0; row < weights.size(); ++row)
+                {
+                    if (weights[row] == 0)
+                    {
+                        level.constraintMatrix.row(index + row).setZero();
+                        level.upperBound[index + row] = 0;
+                    }
+                }
+            }
+
+            if (constraint.get().task->type() == System::LinearTask::Type::inequality)
+            {
+                level.lowerBound.segment(index, constraint.get().task->size())
+                    .setConstant(-OsqpEigen::INFTY);
+            } else
+            {
+                assert(constraint.get().task->type() == System::LinearTask::Type::equality);
+
+                level.lowerBound.segment(index, constraint.get().task->size())
+                    = level.upperBound.segment(index, constraint.get().task->size());
+            }
+
+            index += constraint.get().task->size();
+        }
+
+        if (index != level.numberOfConstraints)
         {
             log()->error("{} The number of constraints changed. Please call finalize() again. "
-                         "Expected number of constraints: {}. Adding the constrained named {}, the "
-                         "number of constraints becomes {}.",
+                         "Expected number of constraints: {}. Computed number of constraints: {}.",
                          logPrefix,
-                         m_pimpl->numberOfConstraints,
-                         constraint.get().task->getDescription(),
-                         index + constraint.get().task->size());
+                         level.numberOfConstraints,
+                         index);
             return false;
         }
 
-        Eigen::Ref<const Eigen::MatrixXd> A = constraint.get().task->getA();
-        Eigen::Ref<const Eigen::VectorXd> b = constraint.get().task->getB();
-
-        m_pimpl->constraintMatrix.middleRows(index, constraint.get().task->size()) = A;
-        m_pimpl->upperBound.segment(index, constraint.get().task->size()) = b;
-
-        if (constraint.get().task->type() == System::LinearTask::Type::inequality)
+        // update the solver
+        if (!level.isFirstIteration)
         {
-            m_pimpl->lowerBound.segment(index, constraint.get().task->size())
-                .setConstant(-OsqpEigen::INFTY);
+            if (!level.updateSolver())
+            {
+                log()->error("{} Unable to update the QP solver.", logPrefix);
+                return false;
+            }
         } else
         {
-            assert(constraint.get().task->type() == System::LinearTask::Type::equality);
-
-            m_pimpl->lowerBound.segment(index, constraint.get().task->size()) = b;
+            if (!level.initializeSolver())
+            {
+                log()->error("{} Unable to run the QP solver the first time.", logPrefix);
+                return false;
+            }
+            level.isFirstIteration = false;
         }
 
-        index += constraint.get().task->size();
-    }
-
-    if (index != m_pimpl->numberOfConstraints)
-    {
-        log()->error("{} The number of constraints changed. Please call finalize() again. "
-                     "Expected number of constraints: {}. Computed number of constraints: {}.",
-                     logPrefix,
-                     m_pimpl->numberOfConstraints,
-                     index);
-        return false;
-    }
-
-    // update the solver
-    if (!m_pimpl->isFirstIteration)
-    {
-        if (!m_pimpl->updateSolver())
+        // solve the QP
+        if (level.solver.solveProblem() != OsqpEigen::ErrorExitFlag::NoError)
         {
-            log()->error("{} Unable to update the QP solver.", logPrefix);
+            log()->error("{} Unable to to solve the problem.", logPrefix);
             return false;
         }
-    } else
-    {
-        if (!m_pimpl->initializeSolver())
+
+        if (level.solver.getStatus() != OsqpEigen::Status::Solved
+            && level.solver.getStatus() != OsqpEigen::Status::SolvedInaccurate)
         {
-            log()->error("{} Unable to run the QP solver the first time.", logPrefix);
+            log()->error("{} osqp was not able to find a feasible solution.", logPrefix);
             return false;
         }
-        m_pimpl->isFirstIteration = false;
-    }
 
-    // solve the QP
-    if (m_pimpl->solver.solveProblem() != OsqpEigen::ErrorExitFlag::NoError)
-    {
-        log()->error("{} Unable to to solve the problem.", logPrefix);
-        return false;
-    }
+        if (level.solver.getStatus() == OsqpEigen::Status::SolvedInaccurate)
+        {
+            log()->debug("{} The solver found an inaccurate feasible solution.", logPrefix);
+        }
 
-    if (m_pimpl->solver.getStatus() != OsqpEigen::Status::Solved
-        && m_pimpl->solver.getStatus() != OsqpEigen::Status::SolvedInaccurate)
-    {
-        log()->error("{} osqp was not able to find a feasible solution.", logPrefix);
-        return false;
-    }
-
-    if (m_pimpl->solver.getStatus() == OsqpEigen::Status::SolvedInaccurate)
-    {
-        log()->debug("{} The solver found an inaccurate feasible solution.", logPrefix);
+        for (auto& cost : level.costs)
+        {
+            cost.get().achievedOutput.noalias() = cost.get().task->getA() * level.solver.getSolution();
+        }
     }
 
     // retrieve the solution
@@ -543,12 +583,12 @@ bool QPInverseKinematics::advance()
     const std::size_t joints = m_pimpl->robotVelocityVariable.size - spatialVelocitySize;
 
     m_pimpl->solution.jointVelocity
-        = m_pimpl->solver.getSolution().segment(m_pimpl->robotVelocityVariable.offset
+        = m_pimpl->solvers.back()->solver.getSolution().segment(m_pimpl->robotVelocityVariable.offset
                                                     + spatialVelocitySize,
                                                 joints);
 
     m_pimpl->solution.baseVelocity.coeffs()
-        = m_pimpl->solver.getSolution().segment<spatialVelocitySize>(
+        = m_pimpl->solvers.back()->solver.getSolution().segment<spatialVelocitySize>(
             m_pimpl->robotVelocityVariable.offset);
 
     m_pimpl->isValid = true;
@@ -632,7 +672,12 @@ std::string QPInverseKinematics::toString() const
 
 Eigen::Ref<const Eigen::VectorXd> QPInverseKinematics::getRawSolution() const
 {
-    return m_pimpl->solver.getSolution();
+    if (m_pimpl->solvers.empty())
+    {
+        static const Eigen::VectorXd empty;
+        return empty;
+    }
+    return m_pimpl->solvers.back()->solver.getSolution();
 }
 
 IntegrationBasedIKProblem
@@ -736,16 +781,16 @@ QPInverseKinematics::build(std::weak_ptr<const ParametersHandler::IParametersHan
             return IntegrationBasedIKProblem();
         }
 
-        if (priority != 0 && priority != 1)
+        if (priority < 0)
         {
-            log()->error("{} Invalid priority provided for the task named '{}'. For the time being "
-                         "we support only priority equal to 0 or 1.",
+            log()->error("{} Invalid priority provided for the task named '{}'. "
+                         "The priority must be nonnegative.",
                          logPrefix,
                          taskGroupName);
             return IntegrationBasedIKProblem();
         }
 
-        if (priority == 1)
+        if (priority > 0)
         {
             std::string weightProviderType = "ConstantWeightProvider";
             if (!taskGroup->getParameter("weight_provider_type", weightProviderType))
@@ -779,7 +824,6 @@ QPInverseKinematics::build(std::weak_ptr<const ParametersHandler::IParametersHan
                 return IntegrationBasedIKProblem();
             }
 
-            // the weight is considered only if priority is equal to 1
             if (!solver->addTask(taskInstance, taskGroupName, priority, weightProvider))
             {
                 log()->error("{} Unable to add the task named '{}' in the solver.",

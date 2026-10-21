@@ -30,10 +30,10 @@ namespace IK
  * QPInverseKinematics is a concrete class and implements an integration base inverse kinematics.
  * The inverse kinematics is here implemented as Quadratic Programming (QP) problem. The user should
  * set the desired task with the method QPInverseKinematics::addTask. Each task has a given
- * priority. Currently we support only priority equal to 0 or 1. If the task priority is set to 0
- * the task will be considered as hard task, thus treated as an equality constraint. If the priority
- * is equal to 1 the task will be embedded in the cost function. The class is also able to treat
- * inequality constraints.
+ * priority. Priority 0 denotes hard equality or inequality constraints. Each distinct positive
+ * priority denotes a weighted cost level, solved in increasing priority order. Each solver retains
+ * the hard constraints and the achieved outputs of all higher-priority costs as constraints.
+ * Zero-weight cost rows are not constrained at lower levels. Priority values need not be contiguous.
  * A possible usage of the IK can be found in "Romualdi et al. A Benchmarking of DCM Based
  * Architectures for Position and Velocity Controlled Walking of Humanoid Robots"
  * https://doi.org/10.1109/HUMANOIDS.2018.8625025
@@ -81,10 +81,7 @@ public:
      * default value is an object that does not contain any value. The user may avoid to pass a
      * provider only if the priority of the task is equal to 0.
      * @return true if the task has been added to the solver.
-     * @warning The QPTSID cannot handle inequality tasks (please check Task::Type) with priority
-     * equal to 1.
-     * @warning The QPTSID can handle only priority equal to 0 and 1. 0 means high priority while 1
-     * low priority.
+    * @warning Inequality tasks (please check Task::Type) are supported only at priority 0.
      */
     bool
     addTask(std::shared_ptr<Task> task,
@@ -102,7 +99,7 @@ public:
      * @return true if the task has been added to the solver.
      * @note The solver assumes the weight is a constant value.
      * @warning The QPInverseKinematics cannot handle inequality tasks (please check Task::Type)
-     * with priority equal to 1.
+    * with positive priority.
      */
     bool addTask(std::shared_ptr<Task> task,
                  const std::string& taskName,
@@ -179,7 +176,7 @@ public:
      * |:---------:|:------------------------------:|:---------------:|:----------------------------------------------------------------------------------------------:|:---------:|
      * |`TASK_NAME`|             `type`             |     `string`    |   String representing the type of the task. The string should match the name of the C++ class. |    Yes    |
      * |`TASK_NAME`|           `priority`           |       `int`     | Priority associated to the task.  (Check QPInverseKinematics::addTask for further information) |    Yes    |
-     * |`TASK_NAME`|     `weight_provider_type`     |     `string`    |  String representing the type of the weight provider. The string should match the name of the C++ class. It is required only if the task is low priority. The default value in case of low priority task (`priority = 1`) is `ConstantWeightProvider`            |     No    |
+    * |`TASK_NAME`|     `weight_provider_type`     |     `string`    |  String representing the type of the weight provider. The string should match the name of the C++ class. Used for every positive-priority task. The default value is `ConstantWeightProvider`. |     No    |
      * Given the weight type specified by `weight_provider_type`, the user must specify all the
      * parameters required by the provider in the `TASK_NAME` group handler
      * `TASK_NAME` is a placeholder for the name of the task contained in the `tasks` list.
